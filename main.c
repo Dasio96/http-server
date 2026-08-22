@@ -31,14 +31,23 @@ void handle_client(int client_fd, const char *buffer) {
 
   printf("Method: %s, Path: %s, Protocol: %s\n", method, path, protocol);
 
-  const char *response = "HTTP/1.1 200 OK\r\n"
-                         "Content-Type: text/plain\r\n"
-                         "Content-Length: 13\r\n"
-                         "Connection: close\r\n"
-                         "\r\n"
-                         "Hello!";
-
-  send(client_fd, response, strlen(response), 0);
+  if (strcmp(path, "/") == 0) {
+    const char *response = "HTTP/1.1 200 OK\r\n"
+                           "Content-Type: text/html\r\n"
+                           "Content-Length: 38\r\n"
+                           "Connection: close\r\n"
+                           "\r\n"
+                           "<h1>Hello</h1>";
+    send(client_fd, response, strlen(response), 0);
+  } else {
+    const char *not_found = "HTTP/1.1 404 Not Found\r\n"
+                            "Content-Type: text/plain\r\n"
+                            "Content-Length: 13\r\n"
+                            "Connection: close\r\n"
+                            "\r\n"
+                            "404 Not Found";
+    send(client_fd, not_found, strlen(not_found), 0);
+  }
 }
 
 int main(void) {
@@ -47,6 +56,9 @@ int main(void) {
     perror("Socket creation failed");
     return EXIT_FAILURE;
   }
+
+  int opt = 1;
+  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
   struct sockaddr_in address;
   address.sin_family = AF_INET;
