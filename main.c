@@ -25,6 +25,13 @@ int main(void) {
     return EXIT_FAILURE;
   }
 
+  int listen_status = listen(server_fd, 10);
+  if (listen_status < 0) {
+    perror("Listen failed");
+    close(server_fd);
+    return EXIT_FAILURE;
+  }
+
   close(server_fd);
   return EXIT_SUCCESS;
 }
