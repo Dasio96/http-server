@@ -2,6 +2,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -101,6 +102,31 @@ int main(void) {
         }
 
         printf("%d\n", client_fd);
+      } else {
+
+        int client_fd = events[i].data.fd;
+        char buffer[1024] = {0};
+
+        ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+
+        if (bytes_read <= 0) {
+          printf("Client disconnected %d\n", client_fd);
+          epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+          close(client_fd);
+        } else {
+          printf("Recived request: \n%s\n", buffer);
+
+          const char *response = "HTTP/1.1 200 OK\r\n"
+                                 "Content-Type: text/plain\r\n"
+                                 "Content-Length: 13\r\n"
+                                 "Connection: close\r\n"
+                                 "\r\n"
+                                 "Hello, Feets!";
+
+          send(client_fd, response, strlen(response), 0);
+          epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+          close(client_fd);
+        }
       }
     }
   }
