@@ -2,6 +2,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -42,6 +43,13 @@ int main(void) {
 
   if (set_nonblocking(server_fd) < 0) {
     perror("Failed to set non-blocking mode");
+    close(server_fd);
+    return EXIT_FAILURE;
+  }
+
+  int epoll_fd = epoll_create1(0);
+  if (epoll_fd < 0) {
+    perror("Epoll failed");
     close(server_fd);
     return EXIT_FAILURE;
   }
