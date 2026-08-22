@@ -17,6 +17,30 @@ int set_nonblocking(int fd) {
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+void handle_client(int client_fd, const char *buffer) {
+  char method[16] = {0};
+  char path[256] = {0};
+  char protocol[16] = {0};
+
+  if (sscanf(buffer, "%15s %255s %15s", method, path, protocol) < 3) {
+    const char *bad_request =
+        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+    send(client_fd, bad_request, strlen(bad_request), 0);
+    return;
+  }
+
+  printf("Method: %s, Path: %s, Protocol: %s\n", method, path, protocol);
+
+  const char *response = "HTTP/1.1 200 OK\r\n"
+                         "Content-Type: text/plain\r\n"
+                         "Content-Length: 13\r\n"
+                         "Connection: close\r\n"
+                         "\r\n"
+                         "Hello!";
+
+  send(client_fd, response, strlen(response), 0);
+}
+
 int main(void) {
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
@@ -103,7 +127,6 @@ int main(void) {
 
         printf("%d\n", client_fd);
       } else {
-
         int client_fd = events[i].data.fd;
         char buffer[1024] = {0};
 
@@ -114,23 +137,13 @@ int main(void) {
           epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
           close(client_fd);
         } else {
-          printf("Recived request: \n%s\n", buffer);
-
-          const char *response = "HTTP/1.1 200 OK\r\n"
-                                 "Content-Type: text/plain\r\n"
-                                 "Content-Length: 13\r\n"
-                                 "Connection: close\r\n"
-                                 "\r\n"
-                                 "Hello, Feets!";
-
-          send(client_fd, response, strlen(response), 0);
+          handle_client(client_fd, buffer);
           epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
           close(client_fd);
         }
       }
     }
   }
-
   close(server_fd);
   return EXIT_SUCCESS;
 }
