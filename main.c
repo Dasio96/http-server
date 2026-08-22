@@ -54,6 +54,18 @@ int main(void) {
     return EXIT_FAILURE;
   }
 
+  struct epoll_event ev;
+  ev.events = EPOLLIN;
+  ev.data.fd = server_fd;
+  int control = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
+
+  if (control == -1) {
+    perror("Epoll ctl failed");
+    close(server_fd);
+    close(epoll_fd);
+    return EXIT_FAILURE;
+  }
+
   close(server_fd);
   return EXIT_SUCCESS;
 }
