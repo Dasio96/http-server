@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,6 +6,13 @@
 #include <unistd.h>
 
 #define PORT 8080
+
+int set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1)
+    return -1;
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
 
 int main(void) {
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -28,6 +36,12 @@ int main(void) {
   int listen_status = listen(server_fd, 10);
   if (listen_status < 0) {
     perror("Listen failed");
+    close(server_fd);
+    return EXIT_FAILURE;
+  }
+
+  if (set_nonblocking(server_fd) < 0) {
+    perror("Failed to set non-blocking mode");
     close(server_fd);
     return EXIT_FAILURE;
   }
