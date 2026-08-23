@@ -12,8 +12,11 @@ int main(void) {
   }
 
   printf("Successfully created TAP interface: %s\n", dev_name);
-  printf("Press Enter to close the device...\n");
-  getchar();
+  printf("Listening for incoming frames...\n");
+
+  while (1) {
+    handle_ethernet_frame(tap_fd);
+  }
 
   close(tap_fd);
   return 0;
