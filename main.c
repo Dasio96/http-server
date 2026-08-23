@@ -12,9 +12,62 @@
 
 int set_nonblocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
-  if (flags == -1)
+  if (flags == -1) {
     return -1;
+  }
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void serve_file(int client_fd, const char *path) {
+  char file_path[512] = {0};
+
+  if (strcmp(path, "/") == 0) {
+    snprintf(file_path, sizeof(file_path), "public/index.html");
+  } else {
+    if (strstr(path, "..")) {
+      const char *forbidden = "HTTP/1.1 403 Forbidden\r\n"
+                              "Content-Length: 9\r\n"
+                              "Connection: close\r\n"
+                              "\r\n"
+                              "Forbidden";
+      send(client_fd, forbidden, strlen(forbidden), 0);
+      return;
+    }
+    snprintf(file_path, sizeof(file_path), "public%s", path);
+  }
+
+  FILE *file = fopen(file_path, "rb");
+  if (!file) {
+    const char *not_found = "HTTP/1.1 404 Not Found\r\n"
+                            "Content-Length: 13\r\n"
+                            "Connection: close\r\n"
+                            "\r\n"
+                            "404 Not Found";
+    send(client_fd, not_found, strlen(not_found), 0);
+    return;
+  }
+
+  fseek(file, 0, SEEK_END);
+  long file_size = ftell(file);
+  fseek(file, 0, SEEK_SET);
+
+  char header[256];
+  snprintf(header, sizeof(header),
+           "HTTP/1.1 200 OK\r\n"
+           "Content-Type: text/html\r\n"
+           "Content-Length: %ld\r\n"
+           "Connection: close\r\n"
+           "\r\n",
+           file_size);
+  send(client_fd, header, strlen(header), 0);
+
+  char buffer[1024];
+  size_t bytes_read;
+  while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    send(client_fd, buffer, bytes_read, 0);
+  }
+
+  fclose(file);
 }
 
 void handle_client(int client_fd, const char *buffer) {
@@ -31,30 +84,14 @@ void handle_client(int client_fd, const char *buffer) {
 
   printf("Method: %s, Path: %s, Protocol: %s\n", method, path, protocol);
 
-  if (strcmp(path, "/") == 0) {
-    const char *response = "HTTP/1.1 200 OK\r\n"
-                           "Content-Type: text/html\r\n"
-                           "Content-Length: 38\r\n"
-                           "Connection: close\r\n"
-                           "\r\n"
-                           "<h1>Hello</h1>";
-    send(client_fd, response, strlen(response), 0);
-  } else {
-    const char *not_found = "HTTP/1.1 404 Not Found\r\n"
-                            "Content-Type: text/plain\r\n"
-                            "Content-Length: 13\r\n"
-                            "Connection: close\r\n"
-                            "\r\n"
-                            "404 Not Found";
-    send(client_fd, not_found, strlen(not_found), 0);
-  }
+  serve_file(client_fd, path);
 }
 
-int main(void) {
+static int create_server_socket(void) {
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
     perror("Socket creation failed");
-    return EXIT_FAILURE;
+    return -1;
   }
 
   int opt = 1;
@@ -65,23 +102,70 @@ int main(void) {
   address.sin_port = htons(PORT);
   address.sin_addr.s_addr = INADDR_ANY;
 
-  int res = bind(server_fd, (struct sockaddr *)&address, sizeof(address));
-  if (res < 0) {
+  if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
     perror("Bind failed");
     close(server_fd);
-    return EXIT_FAILURE;
+    return -1;
   }
 
-  int listen_status = listen(server_fd, 10);
-  if (listen_status < 0) {
+  if (listen(server_fd, 10) < 0) {
     perror("Listen failed");
     close(server_fd);
-    return EXIT_FAILURE;
+    return -1;
   }
 
   if (set_nonblocking(server_fd) < 0) {
     perror("Failed to set non-blocking mode");
     close(server_fd);
+    return -1;
+  }
+
+  return server_fd;
+}
+
+static void accept_new_connection(int epoll_fd, int server_fd) {
+  int client_fd = accept(server_fd, NULL, NULL);
+  if (client_fd < 0) {
+    perror("Accept failed");
+    return;
+  }
+
+  if (set_nonblocking(client_fd) < 0) {
+    perror("Failed to set client socket non-blocking");
+    close(client_fd);
+    return;
+  }
+
+  struct epoll_event client_ev;
+  client_ev.events = EPOLLIN;
+  client_ev.data.fd = client_fd;
+
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_ev) < 0) {
+    perror("Failed to add client socket to epoll");
+    close(client_fd);
+    return;
+  }
+
+  printf("New client connected: %d\n", client_fd);
+}
+
+static void handle_client_event(int epoll_fd, int client_fd) {
+  char buffer[1024] = {0};
+  ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+
+  if (bytes_read <= 0) {
+    printf("Client disconnected: %d\n", client_fd);
+  } else {
+    handle_client(client_fd, buffer);
+  }
+
+  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+  close(client_fd);
+}
+
+int main(void) {
+  int server_fd = create_server_socket();
+  if (server_fd < 0) {
     return EXIT_FAILURE;
   }
 
@@ -95,9 +179,8 @@ int main(void) {
   struct epoll_event ev;
   ev.events = EPOLLIN;
   ev.data.fd = server_fd;
-  int control = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
 
-  if (control == -1) {
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev) == -1) {
     perror("Epoll ctl failed");
     close(server_fd);
     close(epoll_fd);
@@ -109,53 +192,19 @@ int main(void) {
   while (1) {
     int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
     if (nfds < 0) {
-      perror("Eppol_wait failed");
+      perror("Epoll_wait failed");
       break;
     }
 
     for (int i = 0; i < nfds; i++) {
       if (events[i].data.fd == server_fd) {
-        int client_fd = accept(server_fd, NULL, NULL);
-        if (client_fd < 0) {
-          perror("Accept failed");
-          continue;
-        }
-
-        if (set_nonblocking(client_fd) < 0) {
-          perror("Failed to set client socket non-blocking");
-          close(client_fd);
-          continue;
-        }
-
-        struct epoll_event client_ev;
-        client_ev.events = EPOLLIN;
-        client_ev.data.fd = client_fd;
-
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_ev) < 0) {
-          perror("Failed to add client socket to epoll");
-          close(client_fd);
-          continue;
-        }
-
-        printf("%d\n", client_fd);
+        accept_new_connection(epoll_fd, server_fd);
       } else {
-        int client_fd = events[i].data.fd;
-        char buffer[1024] = {0};
-
-        ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-        if (bytes_read <= 0) {
-          printf("Client disconnected %d\n", client_fd);
-          epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-          close(client_fd);
-        } else {
-          handle_client(client_fd, buffer);
-          epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-          close(client_fd);
-        }
+        handle_client_event(epoll_fd, events[i].data.fd);
       }
     }
   }
+
   close(server_fd);
   return EXIT_SUCCESS;
 }
