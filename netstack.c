@@ -47,6 +47,28 @@ void handle_ethernet_frame(int tap_fd) {
   struct eth_hdr *hdr = (struct eth_hdr *)buffer;
   uint16_t ethertype = ntohs(hdr->ethertype);
 
-  printf("received frame: %zd bytes, ethertype: 0x%04x\n", bytes_read,
-         ethertype);
+  if (ethertype == ETH_P_ARP) {
+    struct arp_hdr *arp = (struct arp_hdr *)(buffer + sizeof(struct eth_hdr));
+
+    if (ntohs(arp->opcode) == ARP_REQUEST) {
+      printf("received ARP request\n");
+
+      uint8_t my_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+      uint32_t my_ip = inet_addr("192.168.1.1");
+
+      arp->opcode = htons(ARP_REPLY);
+
+      memcpy(arp->target_mac, arp->sender_mac, 6);
+      arp->target_ip = arp->sender_ip;
+
+      memcpy(arp->sender_mac, my_mac, 6);
+      arp->sender_ip = my_ip;
+
+      memcpy(hdr->dmac, hdr->smac, 6);
+      memcpy(hdr->smac, my_mac, 6);
+
+      write(tap_fd, buffer, bytes_read);
+      printf("Send arp reply!\n");
+    }
+  }
 }
