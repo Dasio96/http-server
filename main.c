@@ -1,5 +1,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,39 @@
 
 #define PORT 8080
 #define MAX_EVENTS 10
+#define NUM_WORKERS 4
+#define QUEUE_CAPACITY 256
+#define REQUEST_BUF_SIZE 1024
+
+typedef struct {
+  int client_fd;
+  char request[REQUEST_BUF_SIZE];
+} task_t;
+
+task_t *task_queue[QUEUE_CAPACITY] = {0};
+int task_count = 0;
+pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+
+int enqueue_task(int client_fd, const char *request) {
+  task_t *task = malloc(sizeof(task_t));
+  if (!task) {
+    return -1;
+  }
+  task->client_fd = client_fd;
+  memcpy(task->request, request, REQUEST_BUF_SIZE);
+
+  pthread_mutex_lock(&queue_mutex);
+  if (task_count >= QUEUE_CAPACITY) {
+    pthread_mutex_unlock(&queue_mutex);
+    free(task);
+    return -1;
+  }
+  task_queue[task_count++] = task;
+  pthread_cond_signal(&queue_cond);
+  pthread_mutex_unlock(&queue_mutex);
+  return 0;
+}
 
 const char *get_mime_type(const char *path) {
   const char *ext = strrchr(path, '.');
@@ -186,17 +220,56 @@ static void accept_new_connection(int epoll_fd, int server_fd) {
 }
 
 static void handle_client_event(int epoll_fd, int client_fd) {
-  char buffer[1024] = {0};
+  char buffer[REQUEST_BUF_SIZE] = {0};
   ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
   if (bytes_read <= 0) {
     printf("Client disconnected: %d\n", client_fd);
-  } else {
-    handle_client(client_fd, buffer);
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+    close(client_fd);
+    return;
   }
 
   epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-  close(client_fd);
+
+  int flags = fcntl(client_fd, F_GETFL, 0);
+  if (flags != -1) {
+    fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
+  }
+
+  if (enqueue_task(client_fd, buffer) < 0) {
+    const char *unavailable = "HTTP/1.1 503 Service Unavailable\r\n"
+                              "Content-Length: 24\r\n"
+                              "Connection: close\r\n"
+                              "\r\n"
+                              "503 Service Unavailable";
+    send(client_fd, unavailable, strlen(unavailable), 0);
+    close(client_fd);
+  }
+}
+
+void *worker_thread(void *arg) {
+  (void)arg;
+  while (1) {
+    pthread_mutex_lock(&queue_mutex);
+
+    while (task_count == 0) {
+      pthread_cond_wait(&queue_cond, &queue_mutex);
+    }
+
+    task_t *task = task_queue[0];
+    for (int i = 1; i < task_count; i++) {
+      task_queue[i - 1] = task_queue[i];
+    }
+    task_count--;
+
+    pthread_mutex_unlock(&queue_mutex);
+
+    handle_client(task->client_fd, task->request);
+    close(task->client_fd);
+    free(task);
+  }
+  return NULL;
 }
 
 int main(void) {
@@ -221,6 +294,16 @@ int main(void) {
     close(server_fd);
     close(epoll_fd);
     return EXIT_FAILURE;
+  }
+
+  pthread_t workers[NUM_WORKERS];
+  for (int i = 0; i < NUM_WORKERS; i++) {
+    if (pthread_create(&workers[i], NULL, worker_thread, NULL) != 0) {
+      perror("Failed to create worker thread");
+      close(server_fd);
+      close(epoll_fd);
+      return EXIT_FAILURE;
+    }
   }
 
   struct epoll_event events[MAX_EVENTS];
