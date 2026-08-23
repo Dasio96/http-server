@@ -1,5 +1,8 @@
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +19,6 @@
 
 typedef struct {
   int client_fd;
-  char request[REQUEST_BUF_SIZE];
 } task_t;
 
 task_t *task_queue[QUEUE_CAPACITY] = {0};
@@ -24,13 +26,14 @@ int task_count = 0;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
 
-int enqueue_task(int client_fd, const char *request) {
+SSL_CTX *ssl_ctx = NULL;
+
+int enqueue_task(int client_fd) {
   task_t *task = malloc(sizeof(task_t));
   if (!task) {
     return -1;
   }
   task->client_fd = client_fd;
-  memcpy(task->request, request, REQUEST_BUF_SIZE);
 
   pthread_mutex_lock(&queue_mutex);
   if (task_count >= QUEUE_CAPACITY) {
@@ -69,7 +72,7 @@ int set_nonblocking(int fd) {
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void serve_file(int client_fd, const char *path) {
+void serve_file(SSL *ssl, const char *path) {
   char file_path[512] = {0};
 
   if (strcmp(path, "/") == 0) {
@@ -81,7 +84,7 @@ void serve_file(int client_fd, const char *path) {
                               "Connection: close\r\n"
                               "\r\n"
                               "Forbidden";
-      send(client_fd, forbidden, strlen(forbidden), 0);
+      SSL_write(ssl, forbidden, strlen(forbidden));
       return;
     }
     snprintf(file_path, sizeof(file_path), "public%s", path);
@@ -94,7 +97,7 @@ void serve_file(int client_fd, const char *path) {
                             "Connection: close\r\n"
                             "\r\n"
                             "404 Not Found";
-    send(client_fd, not_found, strlen(not_found), 0);
+    SSL_write(ssl, not_found, strlen(not_found));
     return;
   }
 
@@ -110,18 +113,18 @@ void serve_file(int client_fd, const char *path) {
            "Connection: close\r\n"
            "\r\n",
            get_mime_type(file_path), file_size);
-  send(client_fd, header, strlen(header), 0);
+  SSL_write(ssl, header, strlen(header));
 
   char buffer[1024];
   size_t bytes_read;
   while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-    send(client_fd, buffer, bytes_read, 0);
+    SSL_write(ssl, buffer, bytes_read);
   }
 
   fclose(file);
 }
 
-void handle_client(int client_fd, const char *buffer) {
+void handle_client(SSL *ssl, const char *buffer) {
   char method[16] = {0};
   char path[256] = {0};
   char protocol[16] = {0};
@@ -129,14 +132,14 @@ void handle_client(int client_fd, const char *buffer) {
   if (sscanf(buffer, "%15s %255s %15s", method, path, protocol) < 3) {
     const char *bad_request =
         "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
-    send(client_fd, bad_request, strlen(bad_request), 0);
+    SSL_write(ssl, bad_request, strlen(bad_request));
     return;
   }
 
   printf("Method: %s, Path: %s, Protocol: %s\n", method, path, protocol);
 
   if (strcmp(method, "GET") == 0) {
-    serve_file(client_fd, path);
+    serve_file(ssl, path);
   } else if (strcmp(method, "POST") == 0) {
     const char *body = strstr(buffer, "\r\n\r\n");
     if (body) {
@@ -149,11 +152,11 @@ void handle_client(int client_fd, const char *buffer) {
                            "Connection: close\r\n"
                            "\r\n"
                            "POST received OK\n";
-    send(client_fd, response, strlen(response), 0);
+    SSL_write(ssl, response, strlen(response));
   } else {
     const char *not_impl = "HTTP/1.1 501 Not Implemented\r\n"
                            "Connection: close\r\n\r\n";
-    send(client_fd, not_impl, strlen(not_impl), 0);
+    SSL_write(ssl, not_impl, strlen(not_impl));
   }
 }
 
@@ -220,30 +223,9 @@ static void accept_new_connection(int epoll_fd, int server_fd) {
 }
 
 static void handle_client_event(int epoll_fd, int client_fd) {
-  char buffer[REQUEST_BUF_SIZE] = {0};
-  ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-  if (bytes_read <= 0) {
-    printf("Client disconnected: %d\n", client_fd);
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-    close(client_fd);
-    return;
-  }
-
   epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
 
-  int flags = fcntl(client_fd, F_GETFL, 0);
-  if (flags != -1) {
-    fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
-  }
-
-  if (enqueue_task(client_fd, buffer) < 0) {
-    const char *unavailable = "HTTP/1.1 503 Service Unavailable\r\n"
-                              "Content-Length: 24\r\n"
-                              "Connection: close\r\n"
-                              "\r\n"
-                              "503 Service Unavailable";
-    send(client_fd, unavailable, strlen(unavailable), 0);
+  if (enqueue_task(client_fd) < 0) {
     close(client_fd);
   }
 }
@@ -265,14 +247,53 @@ void *worker_thread(void *arg) {
 
     pthread_mutex_unlock(&queue_mutex);
 
-    handle_client(task->client_fd, task->request);
-    close(task->client_fd);
+    int client_fd = task->client_fd;
     free(task);
+
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    if (flags != -1) {
+      fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+
+    SSL *ssl = SSL_new(ssl_ctx);
+    SSL_set_fd(ssl, client_fd);
+
+    if (SSL_accept(ssl) > 0) {
+      char buffer[REQUEST_BUF_SIZE] = {0};
+      int bytes_read = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+      if (bytes_read > 0) {
+        handle_client(ssl, buffer);
+      }
+    } else {
+      ERR_print_errors_fp(stderr);
+    }
+
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(client_fd);
   }
   return NULL;
 }
 
 int main(void) {
+  SSL_library_init();
+  OpenSSL_add_all_algorithms();
+  SSL_load_error_strings();
+
+  ssl_ctx = SSL_CTX_new(TLS_server_method());
+  if (!ssl_ctx) {
+    ERR_print_errors_fp(stderr);
+    return EXIT_FAILURE;
+  }
+
+  if (SSL_CTX_use_certificate_file(ssl_ctx, "server.crt", SSL_FILETYPE_PEM) <=
+          0 ||
+      SSL_CTX_use_PrivateKey_file(ssl_ctx, "server.key", SSL_FILETYPE_PEM) <=
+          0) {
+    ERR_print_errors_fp(stderr);
+    return EXIT_FAILURE;
+  }
+
   int server_fd = create_server_socket();
   if (server_fd < 0) {
     return EXIT_FAILURE;
@@ -324,6 +345,7 @@ int main(void) {
     }
   }
 
+  SSL_CTX_free(ssl_ctx);
   close(server_fd);
   return EXIT_SUCCESS;
 }
