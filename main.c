@@ -101,7 +101,26 @@ void handle_client(int client_fd, const char *buffer) {
 
   printf("Method: %s, Path: %s, Protocol: %s\n", method, path, protocol);
 
-  serve_file(client_fd, path);
+  if (strcmp(method, "GET") == 0) {
+    serve_file(client_fd, path);
+  } else if (strcmp(method, "POST") == 0) {
+    const char *body = strstr(buffer, "\r\n\r\n");
+    if (body) {
+      body += 4;
+      printf("Received POST body: %s\n", body);
+    }
+    const char *response = "HTTP/1.1 200 OK\r\n"
+                           "Content-Type: text/plain\r\n"
+                           "Content-Length: 17\r\n"
+                           "Connection: close\r\n"
+                           "\r\n"
+                           "POST received OK\n";
+    send(client_fd, response, strlen(response), 0);
+  } else {
+    const char *not_impl = "HTTP/1.1 501 Not Implemented\r\n"
+                           "Connection: close\r\n\r\n";
+    send(client_fd, not_impl, strlen(not_impl), 0);
+  }
 }
 
 static int create_server_socket(void) {
