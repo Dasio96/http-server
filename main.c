@@ -10,6 +10,23 @@
 #define PORT 8080
 #define MAX_EVENTS 10
 
+const char *get_mime_type(const char *path) {
+  const char *ext = strrchr(path, '.');
+  if (!ext)
+    return "application/octet-stream";
+  if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0)
+    return "text/html";
+  if (strcmp(ext, ".css") == 0)
+    return "text/css";
+  if (strcmp(ext, ".js") == 0)
+    return "application/javascript";
+  if (strcmp(ext, ".png") == 0)
+    return "image/png";
+  if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0)
+    return "image/jpeg";
+  return "text/plain";
+}
+
 int set_nonblocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags == -1) {
@@ -54,11 +71,11 @@ void serve_file(int client_fd, const char *path) {
   char header[256];
   snprintf(header, sizeof(header),
            "HTTP/1.1 200 OK\r\n"
-           "Content-Type: text/html\r\n"
+           "Content-Type: %s\r\n"
            "Content-Length: %ld\r\n"
            "Connection: close\r\n"
            "\r\n",
-           file_size);
+           get_mime_type(file_path), file_size);
   send(client_fd, header, strlen(header), 0);
 
   char buffer[1024];
