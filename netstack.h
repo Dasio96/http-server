@@ -28,6 +28,27 @@ struct arp_hdr {
   uint32_t target_ip;
 } __attribute__((packed));
 
+struct ip_hdr {
+  uint8_t ver_ihl;
+  uint8_t tos;
+  uint16_t tot_len;
+  uint16_t id;
+  uint16_t flags_frag;
+  uint8_t ttl;
+  uint8_t protocol;
+  uint16_t checksum;
+  uint32_t saddr;
+  uint32_t daddr;
+} __attribute__((packed));
+
+struct icmp_hdr {
+  uint8_t type;
+  uint8_t code;
+  uint16_t checksum;
+  uint16_t id;
+  uint16_t seq;
+} __attribute__((packed));
+
 int tap_alloc(char *dev);
 void handle_ethernet_frame(int tap_fd);
 
