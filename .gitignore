@@ -11,9 +11,11 @@
 .nix-deps
 .nix-gc-roots
 
+/test_netstack
+.cache/
+compile_commands.json
 
 .DS_Store
 *.swp
 *~
-.vscode/
-.idea/
+
