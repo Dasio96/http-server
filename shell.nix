@@ -6,6 +6,9 @@ pkgs.mkShell {
     gnumake
     openssl
     pkg-config
+    iproute2
+    gnumake
+    bear
   ];
 
   shellHook = ''

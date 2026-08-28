@@ -1,6 +1,8 @@
 #ifndef NETSTACK_H
 #define NETSTACK_H
 
+#include <arpa/inet.h>
+#include <net/if.h>
 #include <stdint.h>
 
 #define ETH_ALEN 6
@@ -49,6 +51,7 @@ struct icmp_hdr {
   uint16_t seq;
 } __attribute__((packed));
 
+uint16_t checksum(void *b, int len);
 int tap_alloc(char *dev);
 void handle_ethernet_frame(int tap_fd);
 
